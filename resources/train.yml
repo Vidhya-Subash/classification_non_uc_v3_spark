@@ -1,0 +1,24 @@
+resources:
+  jobs:
+    train1:
+      name: train1
+      type: MODEL_TRAIN
+      
+      email_notifications:
+        on_failure:
+          - himanshu.bajpai@tigeranalytics.com
+
+      tasks:  
+        - task_key: Train
+          notebook_task:
+            notebook_path: /notebooks/Train
+            base_parameters:
+              env: dev
+
+      access_control_list:
+        - group_name: MLCore_Services
+          permission_level: CAN_MANAGE
+           
+
+    
+    

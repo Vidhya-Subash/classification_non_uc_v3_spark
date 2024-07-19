@@ -1,0 +1,28 @@
+resources:
+  jobs:
+    diabetes_1907_v2_inference:
+      name: diabetes_1907_v2_inference
+      type: Inference
+      #is_deterministic: False
+
+      schedule:
+        # Run every day at 8:37 AM
+        quartz_cron_expression: '0 0/2 * 1/1 * ? *'
+        timezone_id: Asia/Calcutta
+        pause_status: PAUSED
+
+      email_notifications:
+        on_failure:
+          - himanshu.bajpai@tigeranalytics.com
+
+      tasks:
+        - task_key: Inference
+          notebook_task:
+            notebook_path: /notebooks/Inference
+            base_parameters:
+              env: dev
+      
+      access_control_list:
+        - group_name: MLCore_Services
+          permission_level: CAN_MANAGE
+          
