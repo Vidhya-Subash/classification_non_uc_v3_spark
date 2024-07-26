@@ -35,13 +35,26 @@ print(f"Input task : {task}")
 import yaml
 import ast
 from MLCORE_SDK import mlclient
+import json
+
 try:
     solution_config = (dbutils.widgets.get("solution_config"))
-    solution_config = ast.literal_eval(solution_config)
+    solution_config = json.loads(solution_config)
+    print("Loaded config from dbutils")
 except Exception as e:
     print(e)
     with open('../data_config/SolutionConfig.yaml', 'r') as solution_config:
         solution_config = yaml.safe_load(solution_config)  
+
+# COMMAND ----------
+
+try:
+    retrain_params = (dbutils.widgets.get("retrain_params"))
+    retrain_params = json.loads(retrain_params)
+    print("Loaded Retrain Params from job params")
+    is_retrain = True
+except:
+    is_retrain = False
 
 # COMMAND ----------
 
@@ -166,7 +179,6 @@ def update_task_logger(catalog_name, db_name, task_logger_table_name, end_marker
     if table_already_created(catalog_name, db_name, task_logger_table_name):
         if catalog_name and catalog_name.lower() != "none":
             spark.sql(f"USE CATALOG {catalog_name}")
-
         # Get the maximum id from the existing logging table
         max_id = spark.sql(f"SELECT MAX(id) as max_id FROM {db_name}.{task_logger_table_name}").collect()[0].max_id
         if max_id is None:
@@ -179,7 +191,6 @@ def update_task_logger(catalog_name, db_name, task_logger_table_name, end_marker
     else:
         if catalog_name and catalog_name.lower() != "none":
             spark.sql(f"USE CATALOG {catalog_name}")
-        
         # Add the id column starting from 1 for the first record
         df_task = df_task.withColumn("id", F.lit(1))
         df_task.createOrReplaceTempView(task_logger_table_name)
@@ -187,45 +198,6 @@ def update_task_logger(catalog_name, db_name, task_logger_table_name, end_marker
     
     return df_task
 
-
-# COMMAND ----------
-
-# source_1_df = spark.sql(f"SELECT * FROM {input_table_paths['input_1']}")
-
-# COMMAND ----------
-
-# if is_scheduled:
-#   pickle_file_path = f"/mnt/FileStore/{output_table_configs['output_1']['schema']}"
-#   dbutils.fs.mkdirs(pickle_file_path)
-#   print(f"Created directory : {pickle_file_path}")
-#   pickle_file_path = f"/dbfs/{pickle_file_path}/{output_table_configs['output_1']['table']}.pickle"
-
-#   try : 
-#     with open(pickle_file_path, "rb") as handle:
-#         obj_properties = pickle.load(handle)
-#         print(f"Instance loaded successfully")
-#   except Exception as e:
-#     print(f"Exception while loading cache : {e}")
-#     obj_properties = {}
-#   print(f"Existing Cache : {obj_properties}")
-
-#   if not obj_properties :
-#     start_marker = 1
-#   elif obj_properties and obj_properties.get("end_marker",0) == 0:
-#     start_marker = 1
-#   else :
-#     start_marker = obj_properties["end_marker"] + 1
-#   end_marker = start_marker + batch_size - 1
-# else :
-#   start_marker = 1
-#   end_marker = source_1_df.count()
-
-# print(f"Start Marker : {start_marker}\nEnd Marker : {end_marker}")
-
-# COMMAND ----------
-
-# DBTITLE 1,Perform some feature engineering step. 
-# source_1_df = source_1_df.filter((F.col("id") >= start_marker) & (F.col("id") <= end_marker))
 
 # COMMAND ----------
 
@@ -238,32 +210,38 @@ if task.lower() != "fe":
     print(end_marker)
 else :
     source_1_df = spark.sql(f"SELECT * FROM {input_table_paths['input_1']}")
+    if is_retrain:
+        for data_entry in retrain_params.get("train_data_date_list", []):
+            if "Source" in data_entry.get("job_sub_type", []):
+                ft_start_timestamp = data_entry.get("start_date")
+                ft_end_timestamp = data_entry.get("end_date")
+
+        if ft_start_timestamp not in ["","0",None] and ft_end_timestamp not in ["","0",None] : 
+            print(f"Filtering the feature data")
+            source_1_df = source_1_df.filter(F.col("timestamp") >= int(ft_start_timestamp)).filter(F.col("timestamp") <= int(ft_end_timestamp))
+        else:
+            print("No new feature data found for the selected timestamp. Exiting notebook.")
+            dbutils.notebook.exit("No new feature data found for the selected timestamp.")
 
 # COMMAND ----------
 
-# DBTITLE 1,Exit the job if there is no new data
-# if not source_1_df.first():
-#   dbutils.notebook.exit("No new data is available for DPD, hence exiting the notebook")
-
-# COMMAND ----------
-
-if task.lower() != "fe":
+# if task.lower() != "fe":
     # Calling job run add for DPD job runs
-    mlclient.log(
-        operation_type="job_run_add", 
-        session_id = sdk_session_id, 
-        dbutils = dbutils, 
-        request_type = task, 
-        job_config = 
-        {
-            "table_name" : output_table_configs["output_1"]["table"],
-            "table_type" : "Source",
-            "batch_size" : batch_size
-        },
-        tracking_env = env,
-        spark = spark,
-        verbose = True,
-        )
+mlclient.log(
+    operation_type="job_run_add", 
+    session_id = sdk_session_id, 
+    dbutils = dbutils, 
+    request_type = task, 
+    job_config = 
+    {
+        "table_name" : output_table_configs["output_1"]["table"],
+        "table_type" : "Source",
+        "batch_size" : batch_size
+    },
+    tracking_env = env,
+    spark = spark,
+    verbose = True,
+    )
 
 # COMMAND ----------
 
@@ -291,6 +269,7 @@ from sklearn.preprocessing import RobustScaler
 # creating a copy of df
 df1 = data
 
+df1 = df1.drop_duplicates()
 df1 = df1[df1['gender'] != 'Other']
 
 def recategorize_smoking(smoking_status):
@@ -526,11 +505,3 @@ if task.lower() != "fe":
         platform_table_type = "Task_Log",
         tracking_url = tracking_url,
         verbose=True,)
-
-# COMMAND ----------
-
-# if is_scheduled:
-#   obj_properties['end_marker'] = end_marker
-#   with open(pickle_file_path, "wb") as handle:
-#       pickle.dump(obj_properties, handle, protocol=pickle.HIGHEST_PROTOCOL)
-#       print(f"Instance successfully saved successfully")

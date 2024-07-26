@@ -4,13 +4,17 @@
 
 # COMMAND ----------
 
-# DBTITLE 1,Installing MLCore SDK
 # MAGIC %pip install sparkmeasure
 # MAGIC %pip install google-auth
 # MAGIC %pip install google-cloud-storage
 # MAGIC %pip install azure-storage-blob
 # MAGIC %pip install azure-identity
 # MAGIC %pip install protobuf==3.17.2
+
+# COMMAND ----------
+
+# DBTITLE 1,Installing MLCore SDK
+# MAGIC %pip install sparkmeasure
 
 # COMMAND ----------
 
@@ -31,10 +35,12 @@ import ast
 import pickle
 from MLCORE_SDK import mlclient
 from pyspark.sql import functions as F
+import json
 
 try:
     solution_config = (dbutils.widgets.get("solution_config"))
-    solution_config = ast.literal_eval(solution_config)
+    solution_config = json.loads(solution_config)
+    print("Loaded config from dbutils")
 except Exception as e:
     print(e)
     with open('../data_config/SolutionConfig.yaml', 'r') as solution_config:
@@ -50,11 +56,12 @@ except Exception as e:
 # DBTITLE 1,Imports
 import numpy as np
 import pandas as pd
-from sklearn.impute import SimpleImputer
-from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
-from sklearn.linear_model import LogisticRegression
+from pyspark.sql.window import Window
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.classification import LogisticRegression
+from pyspark.ml import Pipeline
+from pyspark.sql.functions import col
+from datetime import datetime
 import time
 from sklearn.metrics import *
 import json
@@ -66,6 +73,16 @@ try :
 except :
     env = "dev"
 print(f"Input environment : {env}")
+
+# COMMAND ----------
+
+try:
+    retrain_params = (dbutils.widgets.get("retrain_params"))
+    retrain_params = json.loads(retrain_params)
+    print("Loaded Retrain Params from job params")
+    is_retrain = True
+except:
+    is_retrain = False
 
 # COMMAND ----------
 
@@ -91,6 +108,13 @@ storage_configs = solution_config["train"]["storage_configs"]
 feature_columns = solution_config['train']["feature_columns"]
 target_columns = solution_config['train']["target_columns"]
 test_size = solution_config['train']["test_size"]
+
+model_name=model_configs.get('model_params', {}).get('model_name', '')
+print(f"Model Name : {model_name}")
+
+from MLCORE_SDK.helpers.mlc_helper import get_job_id_run_id
+job_id, run_id ,task_id= get_job_id_run_id(dbutils)
+print(job_id, run_id)
 
 # COMMAND ----------
 
@@ -130,42 +154,6 @@ gt_data.display()
 
 # COMMAND ----------
 
-# DBTITLE 1,Check if any filters related to date or hyper parameter tuning are passed.
-try : 
-    date_filters = dbutils.widgets.get("date_filters")
-    print(f"Input date filter : {date_filters}")
-    date_filters = json.loads(date_filters)
-except :
-    date_filters = {}
-
-try : 
-    hyperparameters = dbutils.widgets.get("hyperparameters")
-    print(f"Input hyper parameters : {hyperparameters}")
-    hyperparameters = json.loads(hyperparameters)
-except :
-    hyperparameters = {}
-
-print(f"Data filters used in model train : {date_filters}, hyper parameters : {hyperparameters}")
-
-
-# COMMAND ----------
-
-if date_filters and date_filters['feature_table_date_filters'] and date_filters['feature_table_date_filters'] != {} :   
-    ft_start_date = date_filters.get('feature_table_date_filters', {}).get('start_date',None)
-    ft_end_date = date_filters.get('feature_table_date_filters', {}).get('end_date',None)
-    if ft_start_date not in ["","0",None] and ft_end_date not in  ["","0",None] : 
-        print(f"Filtering the feature data")
-        ft_data = ft_data.filter(F.col("timestamp") >= int(ft_start_date)).filter(F.col("timestamp") <= int(ft_end_date))
-
-if date_filters and date_filters['ground_truth_table_date_filters'] and date_filters['ground_truth_table_date_filters'] != {} : 
-    gt_start_date = date_filters.get('ground_truth_table_date_filters', {}).get('start_date',None)
-    gt_end_date = date_filters.get('ground_truth_table_date_filters', {}).get('end_date',None)
-    if gt_start_date not in ["","0",None] and gt_end_date not in ["","0",None] : 
-        print(f"Filtering the ground truth data")
-        gt_data = gt_data.filter(F.col("timestamp") >= int(gt_start_date)).filter(F.col("timestamp") <= int(gt_end_date))
-
-# COMMAND ----------
-
 ft_data.count(), gt_data.count()
 
 # COMMAND ----------
@@ -202,23 +190,9 @@ print(f"Shape: ({final_df.count()}, {len(final_df.columns)})")
 
 # COMMAND ----------
 
-target_columns
-
-# COMMAND ----------
-
 # DBTITLE 1,Spliting the Final df to test and train dfs
-from pyspark.ml.feature import VectorAssembler
-from pyspark.sql.functions import col
-
-# Prepare feature and target columns
-assembler = VectorAssembler(inputCols=feature_columns, outputCol="features")
-final_df = assembler.transform(final_df)
-
 # Split the data into train and test sets
-train_df, test_df = final_df.randomSplit([0.67, 0.33], seed=42)
-
-train_df = train_df.select("features", *target_columns, *feature_columns)
-test_df = test_df.select("features", *target_columns, *feature_columns)
+train_df, test_df = final_df.randomSplit([1-test_size, test_size], seed=42)
 
 # COMMAND ----------
 
@@ -231,17 +205,30 @@ report_directory = f'{env}/media_artifacts/2a3b88f5bb6444b0a19e23e4ef21495a/Solu
 
 # DBTITLE 1,Get Hyper Parameter Tuning Result
 try :
-    hp_tuning_result = dbutils.notebook.run(
-        "Hyperparameter_Tuning", 
-        timeout_seconds=0)
-    hyperparameters = json.loads(hp_tuning_result)["best_hyperparameters"]
-    report_path = json.loads(hp_tuning_result)["report_path"]
+    if is_retrain:
+        hyperparameters = retrain_params.get("hyperparameters", {})
+        print(f"Retraining model with hyper parameters: {hyperparameters}")
+        hp_tuning_result = {}
+    else:
+        hp_tuning_result = dbutils.notebook.run(
+            "Hyperparameter_Tuning", 
+            timeout_seconds=0,
+            arguments={
+                "job_id": job_id,
+                "run_id" : run_id
+            })
+        hyperparameters = json.loads(hp_tuning_result)["best_hyperparameters"]
+        report_path = json.loads(hp_tuning_result)["report_path"]
+        print(f"Training Hyperparameters: {hyperparameters}")
+        print(f"Report path: {report_path}")
 except Exception as e:
     print(e)
+    print("Using default hyper parameters")
     hyperparameters = {}
     hp_tuning_result = {}
 
 # COMMAND ----------
+
 
 from pyspark.sql import functions as F
 from pyspark.ml.feature import VectorAssembler
@@ -249,17 +236,24 @@ from pyspark.ml.classification import LogisticRegression
 from pyspark.ml import Pipeline
 
 if not hyperparameters or hyperparameters == {}:
-    lr = LogisticRegression(labelCol=target_columns[0], featuresCol="features")
-    print("Using model with default hyperparameters")
+    # Without hyperparams
+    model = LogisticRegression(labelCol=target_columns[0], featuresCol="features")
+    print(f"Using model with default hyper parameters")
+elif is_retrain:
+    # Retrain case with hyperparams
+    model = LogisticRegression(**hyperparameters)
+    print(f"Using model with custom hyper parameters from retrain")
 else:
-    lr = LogisticRegression(labelCol=target_columns[0], featuresCol="features", **hyperparameters)
-    print("Using model with custom hyperparameters")
+    # Train case with hyperparams
+    model = LogisticRegression(labelCol=target_columns[0], featuresCol="features", **hyperparameters)
+    print(f"Using model with custom hyper parameters")
 
-pipeline = Pipeline(stages=[lr])
+assembler = VectorAssembler(inputCols=feature_columns, outputCol="features")
+pipeline = Pipeline(stages=[assembler, model])
 
 # COMMAND ----------
 
-first_row_dict = train_df.limit(5)
+first_row_dict = train_df.limit(5).toPandas()
 
 # COMMAND ----------
 
@@ -269,6 +263,7 @@ lr_pipeline = pipeline.fit(train_df)
 
 # COMMAND ----------
 
+# DBTITLE 1,Calculating the test metrics from the model
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
 
 # Predict on the test set
@@ -281,10 +276,6 @@ accuracy = evaluator.evaluate(y_pred, {evaluator.metricName: "accuracy"})
 f1 = evaluator.evaluate(y_pred, {evaluator.metricName: "f1"})
 precision = evaluator.evaluate(y_pred, {evaluator.metricName: "weightedPrecision"})
 recall = evaluator.evaluate(y_pred, {evaluator.metricName: "weightedRecall"})
-
-# COMMAND ----------
-
-y_pred.columns
 
 # COMMAND ----------
 
@@ -313,7 +304,6 @@ train_metrics
 
 from pyspark.sql.functions import lit, udf
 from pyspark.sql.types import ArrayType, DoubleType
-from pyspark.ml.feature import VectorAssembler
 
 # Make predictions
 predictions_train = lr_pipeline.transform(train_df)
@@ -330,13 +320,30 @@ train_output_df = train_output_df.select(columns_to_select)
 
 # COMMAND ----------
 
-train_output_df.columns
+from mlflow.tracking import MlflowClient
+def get_latest_model_version(model_configs):
+    try : 
+        mlflow_uri = model_configs.get("model_registry_params").get("host_url")
+        model_name = model_configs.get("model_params").get("model_name")
+        mlflow.set_registry_uri(mlflow_uri)
+        client = MlflowClient()
+        x = client.get_latest_versions(model_name)
+        model_version = x[0].version
+        return model_version
+    except Exception as e :
+        print(f"Exception in {get_latest_model_version} : {e}")
+        return 0
 
 # COMMAND ----------
 
-from datetime import datetime
-from pyspark.sql import functions as F
-from pyspark.sql.window import Window
+model_version = get_latest_model_version(model_configs) + 1
+train_output_df = train_output_df.withColumn("model_name", F.lit(model_name).cast("string"))
+train_output_df = train_output_df.withColumn("model_version", F.lit(model_version).cast("string"))
+train_output_df = train_output_df.withColumn("train_job_id", F.lit(job_id).cast("string"))
+train_output_df = train_output_df.withColumn("train_run_id", F.lit(run_id).cast("string"))
+train_output_df = train_output_df.withColumn("train_task_id",F.lit(task_id).cast("string"))
+
+# COMMAND ----------
 
 def to_date_(col):
     """
@@ -392,9 +399,12 @@ print(f"HIVE METASTORE DATABASE NAME : {db_name}")
 
 train_output_df.createOrReplaceTempView(table_name)
 
-feature_table_exist = [True for table_data in spark.catalog.listTables(db_name) if table_data.name.lower() == table_name.lower() and not table_data.isTemporary]
+# feature_table_exist = [True for table_data in spark.catalog.listTables(db_name) if table_data.name.lower() == table_name.lower() and not table_data.isTemporary]
 
-if not any(feature_table_exist):
+train_table_exists = [True for table_data in spark.catalog.listTables(db_name) if table_data.name.lower() == table_name.lower() and not table_data.isTemporary]
+
+# if not any(feature_table_exist):
+if not any(train_table_exists):
   print(f"CREATING SOURCE TABLE")
   spark.sql(f"CREATE TABLE IF NOT EXISTS {output_path} AS SELECT * FROM {table_name}")
 else :
@@ -406,7 +416,8 @@ if catalog_name and catalog_name.lower() != "none":
 else:
   output_1_table_path = spark.sql(f"desc formatted {output_path}").filter(F.col("col_name") == "Location").select("data_type").collect()[0][0]
 
-print(f"Features Hive Path : {output_1_table_path}")
+# print(f"Features Hive Path : {output_1_table_path}")
+print(f"Train Output Hive Path : {output_1_table_path}")
 
 # COMMAND ----------
 
@@ -518,67 +529,141 @@ model_artifact_id = mlclient.log(operation_type = "register_model",
 
 # COMMAND ----------
 
-from MLCORE_SDK.helpers.mlc_helper import get_job_id_run_id
-job_id, run_id, task_id = get_job_id_run_id(dbutils)
-print(job_id, run_id)
+if not model_artifact_id :
+    dbutils.notebook.exit("Model is not registered successfully hence skipping the saving of tuning trials plots.")
 
 # COMMAND ----------
 
-from MLCORE_SDK.sdk.manage_sdk_session import get_session
-existing_session_data = get_session(
-    sdk_session_id,
-    dbutils,
-    api_endpoint=tracking_url,
-    tracking_env=tracking_env,
-).json()["data"]
-existing_session_state = existing_session_data.get("state_dict", {})
-project_id = existing_session_state.get("project_id", "")
-version = existing_session_state.get("version", "")
-print(project_id, version)
+# DBTITLE 1,Aggregated Train Output Table
+db_name = output_table_configs["output_1"]["schema"]
+aggregated_table_name = f"{sdk_session_id}_train_output_aggregated_table"
+catalog_name = output_table_configs["output_1"]["catalog_name"]
+if catalog_name and catalog_name.lower() != "none":
+    output_path = f"{catalog_name}.{db_name}.{aggregated_table_name}"
+else :
+    output_path = f"{db_name}.{aggregated_table_name}"
+
+# Add Model Artifact ID retrieved after registering the model.
+train_output_df = train_output_df.withColumn("model_artifact_id", F.lit(model_artifact_id))
+
+# Get the catalog name from the table name
+if catalog_name and catalog_name.lower() != "none":
+  spark.sql(f"USE CATALOG {catalog_name}")
+
+# Create the database if it does not exist
+spark.sql(f"CREATE DATABASE IF NOT EXISTS {db_name}")
+print(f"HIVE METASTORE DATABASE NAME : {db_name}")
+
+train_table_exists = [True for table_data in spark.catalog.listTables(db_name) if table_data.name.lower() == aggregated_table_name.lower() and not table_data.isTemporary]
+
+# IF the table exists, reset the ID based on existing max marker
+if any(train_table_exists):
+    max_id_value = spark.sql(f"SELECT max(id) FROM {output_path}").collect()[0][0]
+    window = Window.orderBy(F.monotonically_increasing_id())
+    train_output_df = train_output_df.withColumn("id", F.row_number().over(window) + max_id_value)
+
+# Create temporary View.
+train_output_df.createOrReplaceTempView(aggregated_table_name)
+
+if not any(train_table_exists):
+  print(f"CREATING SOURCE TABLE")
+  spark.sql(f"CREATE TABLE IF NOT EXISTS {output_path} PARTITIONED BY (model_artifact_id) AS SELECT * FROM {aggregated_table_name}")
+else :
+  print(F"UPDATING SOURCE TABLE")
+  spark.sql(f"INSERT INTO {output_path} PARTITION (model_artifact_id) SELECT * FROM {aggregated_table_name}")
+
+if catalog_name and catalog_name.lower() != "none":
+  aggregated_table_path = output_path
+else:
+  aggregated_table_path = spark.sql(f"desc formatted {output_path}").filter(F.col("col_name") == "Location").select("data_type").collect()[0][0]
+
+print(f"Aggregated Train Output Hive Path : {aggregated_table_path}")
 
 # COMMAND ----------
 
-try:
-    if storage_configs["cloud_provider"] == "databricks_uc":
-        catalog_name = storage_configs.get("catalog_name")
-        schema_name = storage_configs.get("schema_name")
-        volume_name = storage_configs.get("volume_name")
+# Register Aggregate Train Output in MLCore
+mlclient.log(operation_type = "register_table",
+    sdk_session_id = sdk_session_id,
+    dbutils = dbutils,
+    spark = spark,
+    table_name = aggregated_table_name,
+    num_rows = train_output_df.count(),
+    tracking_env = env,
+    cols = train_output_df.columns,
+    column_datatype = train_output_df.dtypes,
+    table_schema = train_output_df.schema,
+    primary_keys = ["id"],
+    table_path = aggregated_table_path,
+    table_type="unitycatalog" if output_table_configs["output_1"]["catalog_name"] else "internal",
+    table_sub_type="Train_Output",
+    platform_table_type = "Aggregated_train_output",
+    verbose=True,)
 
-        artifact_path_uc_volume = f"/Volumes/{catalog_name}/{schema_name}/{volume_name}/{tracking_env}/media_artifacts/{project_id}/{version}/{job_id}/{run_id}"
-        print(artifact_path_uc_volume)
-        mlclient.log(
-            operation_type = "upload_blob_to_cloud",
-            blob_path=report_path,
-            dbutils = dbutils ,
-            target_path = f"{artifact_path_uc_volume}/Model_Evaluation/Tuning_Trails_report_{int(time.time())}.png",
-            resource_type = "databricks_uc",
-            project_id = project_id,
-            version = version,
-            job_id = job_id,
-            run_id = run_id,
-            request_type = "Model_Evaluation",
-            storage_configs = storage_configs,
-            tracking_env = tracking_env,
-            verbose=True)
-    else :
-        report_directory = f"{tracking_env}/media_artifacts/{project_id}/{version}/{job_id}/{run_id}"
-        print(report_directory)
-        container_name = storage_configs.get("container_name")
-        mlclient.log(
-            operation_type = "upload_blob_to_cloud",
-            source_path=report_path,
-            dbutils = dbutils ,
-            target_path = f"{report_directory}/Model_Evaluation/Tuning_Trails_report_{int(time.time())}.png",
-            resource_type = "az",
-            project_id = project_id,
-            version = version,
-            job_id = job_id,
-            run_id = run_id,
-            model_artifact_id = model_artifact_id,
-            request_type = "Model_Evaluation",
-            storage_configs = storage_configs,
-            tracking_env = tracking_env,
-            verbose=True)
-except Exception as err:
-    print(Exception, err)
-    
+# COMMAND ----------
+
+# if not is_retrain:  
+#     from MLCORE_SDK.helpers.mlc_helper import get_job_id_run_id
+#     job_id, run_id, task_id = get_job_id_run_id(dbutils)
+#     print(job_id, run_id)
+
+# COMMAND ----------
+
+if not is_retrain:  
+    from MLCORE_SDK.sdk.manage_sdk_session import get_session
+    existing_session_data = get_session(
+        sdk_session_id,
+        dbutils,
+        api_endpoint=tracking_url,
+        tracking_env=tracking_env,
+    ).json()["data"]
+    existing_session_state = existing_session_data.get("state_dict", {})
+    project_id = existing_session_state.get("project_id", "")
+    version = existing_session_state.get("version", "")
+    print(project_id, version)
+
+# COMMAND ----------
+
+if not is_retrain:  
+    try:
+        if storage_configs["cloud_provider"] == "databricks_uc":
+            catalog_name = storage_configs.get("catalog_name")
+            schema_name = storage_configs.get("schema_name")
+            volume_name = storage_configs.get("volume_name")
+
+            artifact_path_uc_volume = f"/Volumes/{catalog_name}/{schema_name}/{volume_name}/{tracking_env}/media_artifacts/{project_id}/{version}/{job_id}/{run_id}"
+            print(artifact_path_uc_volume)
+            mlclient.log(
+                operation_type = "upload_blob_to_cloud",
+                blob_path=report_path,
+                dbutils = dbutils ,
+                target_path = f"{artifact_path_uc_volume}/Model_Evaluation/Tuning_Trails_report_{int(time.time())}.png",
+                resource_type = "databricks_uc",
+                project_id = project_id,
+                version = version,
+                job_id = job_id,
+                run_id = run_id,
+                request_type = "Model_Evaluation",
+                storage_configs = storage_configs,
+                tracking_env = tracking_env,
+                verbose=True)
+        else :
+            report_directory = f"{tracking_env}/media_artifacts/{project_id}/{version}/{job_id}/{run_id}"
+            print(report_directory)
+            container_name = storage_configs.get("container_name")
+            mlclient.log(
+                operation_type = "upload_blob_to_cloud",
+                source_path=report_path,
+                dbutils = dbutils ,
+                target_path = f"{report_directory}/Model_Evaluation/Tuning_Trails_report_{int(time.time())}.png",
+                resource_type = "az",
+                project_id = project_id,
+                version = version,
+                job_id = job_id,
+                run_id = run_id,
+                model_artifact_id = model_artifact_id,
+                request_type = "Model_Evaluation",
+                storage_configs = storage_configs,
+                tracking_env = tracking_env,
+                verbose=True)
+    except:
+        pass

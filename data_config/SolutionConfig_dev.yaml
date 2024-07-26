@@ -1,6 +1,6 @@
 general_configs : 
   sdk_session_id:
-    dev: f52eb871272d44b2929440bc495eef4d
+    dev: 0d0956ef32bc4ee8a08dc37e2552fe59
     uat: 0bef83f35cd94bdcb2eefef9b7d57e75
     prod: 64ec92d6117247877965d152
   tracking_env: dev
@@ -18,8 +18,8 @@ data_engineering_ft:
     output_tables :
       output_1 :
         catalog_name : null
-        schema : diabetes_hive_db_170701_v2
-        table: diabetes_hive_ft_170701_v2
+        schema : diabetes_hive_db_260701_v2
+        table: diabetes_hive_ft_260701_v2
         primary_keys: index
   storage_configs:
     cloud_provider: azure
@@ -41,8 +41,8 @@ data_engineering_gt:
     output_tables :
       output_1 :
         catalog_name : null
-        schema : diabetes_hive_db_170701_v2
-        table: diabetes_hive_gt_170701_v2
+        schema : diabetes_hive_db_260701_v2
+        table: diabetes_hive_gt_260701_v2
         primary_keys: index
   storage_configs:
     cloud_provider: azure
@@ -58,14 +58,14 @@ feature_pipelines_ft:
     input_tables :
       input_1 :
         catalog_name : null
-        schema : diabetes_hive_db_170701_v2
-        table: diabetes_hive_ft_170701_v2
+        schema : diabetes_hive_db_260701_v2
+        table: diabetes_hive_ft_260701_v2
         primary_keys: index
     output_tables :
         output_1 :
           catalog_name : null
-          schema : diabetes_hive_db_170701_v2
-          table: transformed_diabetes_hive_ft_170701_v2
+          schema : diabetes_hive_db_260701_v2
+          table: transformed_diabetes_hive_ft_260701_v2
           primary_keys: index
   storage_configs:
     cloud_provider: azure
@@ -79,14 +79,14 @@ feature_pipelines_gt:
     input_tables : 
       input_1 :
         catalog_name : null
-        schema : diabetes_hive_db_170701_v2
-        table: diabetes_hive_gt_170701_v2
+        schema : diabetes_hive_db_260701_v2
+        table: diabetes_hive_gt_260701_v2
         primary_keys: index
     output_tables : 
         output_1 :
           catalog_name : null
-          schema : diabetes_hive_db_170701_v2
-          table: transformed_diabetes_hive_gt_170701_v2
+          schema : diabetes_hive_db_260701_v2
+          table: transformed_diabetes_hive_gt_260701_v2
           primary_keys: index  
   storage_configs:
     cloud_provider: azure
@@ -100,19 +100,19 @@ train:
     input_tables : 
       input_1 :
         catalog_name : null
-        schema : diabetes_hive_db_170701_v2
-        table: transformed_diabetes_hive_ft_170701_v2
+        schema : diabetes_hive_db_260701_v2
+        table: transformed_diabetes_hive_ft_260701_v2
         primary_keys: index
       input_2 :
         catalog_name : null
-        schema : diabetes_hive_db_170701_v2
-        table: transformed_diabetes_hive_gt_170701_v2
+        schema : diabetes_hive_db_260701_v2
+        table: transformed_diabetes_hive_gt_260701_v2
         primary_keys: index
     output_tables : 
         output_1 :
           catalog_name : null
-          schema : diabetes_hive_db_170701_v2
-          table: trainoutput_diabetes_170701_v2
+          schema : diabetes_hive_db_260701_v2
+          table: trainoutput_diabetes_260701_v2
           primary_keys: index
   model_configs:
     registry_platform: databricks
@@ -122,7 +122,7 @@ train:
       tracking_env: dev
       host_url: https://adb-1277783902121094.14.azuredatabricks.net
     model_params:   
-      model_name: diabetes_170701_v2
+      model_name: diabetes_260701_v2
   storage_configs:
     cloud_provider: azure
     params:
@@ -146,12 +146,9 @@ train:
     max_evaluations : 20
     primary_metric : accuracy
     search_range :
-      solver : 
-        - lbfgs
-        - liblinear
-      fit_intercept : 
-        - true
-        - false
+      fitIntercept : 
+        - True
+        - False
     max_evaluations : 20
     stop_early : false
     run_parallel : false
@@ -161,14 +158,14 @@ data_prep_deployment_ft:
     input_tables :
       input_1 :
         catalog_name : null
-        schema : diabetes_hive_db_170701_v2
-        table: diabetes_hive_ft_170701_v2
+        schema : diabetes_hive_db_260701_v2
+        table: diabetes_hive_ft_260701_v2
         primary_keys: index
     output_tables :
         output_1 :
           catalog_name : null
-          schema : diabetes_hive_db_170701_v2
-          table: dpd_diabetes_ft_170701_v2
+          schema : diabetes_hive_db_260701_v2
+          table: dpd_diabetes_ft_260701_v2
           primary_keys: index  
   storage_configs:
     cloud_provider: azure
@@ -184,14 +181,14 @@ data_prep_deployment_gt:
     input_tables :
       input_1 :
         catalog_name : null
-        schema : diabetes_hive_db_170701_v2
-        table: diabetes_hive_gt_170701_v2
+        schema : diabetes_hive_db_260701_v2
+        table: diabetes_hive_gt_260701_v2
         primary_keys: index
     output_tables : 
         output_1 :
           catalog_name : null
-          schema : diabetes_hive_db_170701_v2
-          table: dpd_diabetes_gt_170701_v2
+          schema : diabetes_hive_db_260701_v2
+          table: dpd_diabetes_gt_260701_v2
           primary_keys: index  
   storage_configs:
     cloud_provider: azure
@@ -207,19 +204,19 @@ inference:
     input_tables : 
       input_1 :
         catalog_name : null
-        schema : diabetes_hive_db_170701_v2
-        table: dpd_diabetes_ft_170701_v2
+        schema : diabetes_hive_db_260701_v2
+        table: dpd_diabetes_ft_260701_v2
         primary_keys: index
       input_2 :
         catalog_name : null
-        schema : diabetes_hive_db_170701_v2
-        table: dpd_diabetes_gt_170701_v2
+        schema : diabetes_hive_db_260701_v2
+        table: dpd_diabetes_gt_260701_v2
         primary_keys: index
     output_tables : 
         output_1 :
           catalog_name : null
-          schema : diabetes_hive_db_170701_v2
-          table: inference_diabetes_170701_v2
+          schema : diabetes_hive_db_260701_v2
+          table: inference_diabetes_260701_v2
           primary_keys: index
   is_scheduled: true
   batch_size: 100

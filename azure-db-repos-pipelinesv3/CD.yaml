@@ -1,7 +1,7 @@
 resources:
   pipelines:
     - pipeline: ciPipeline  # Local identifier for the dependency
-      source: SDK-Classification_Non_UC_Repos_v3/CI # Path to the first pipeline's YAML file
+      source: SDK-Classification_Non_UC_SPARK_Repos_v3/CI # Path to the first pipeline's YAML file
       trigger:
         branches:
           include:

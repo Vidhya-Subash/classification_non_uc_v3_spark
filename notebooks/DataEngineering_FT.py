@@ -1,8 +1,6 @@
 # Databricks notebook source
-# %pip install /dbfs/FileStore/sdk/dev/MLCoreSDK-0.4.5-py3-none-any.whl --force-reinstall
-%pip install sparkmeasure
-# %pip install numpy==1.19.1
-# %pip install pandas==1.0.5
+# MAGIC %pip install sparkmeasure
+# MAGIC
 
 # COMMAND ----------
 
@@ -33,10 +31,13 @@ import yaml
 import ast
 from MLCORE_SDK import mlclient
 from pyspark.sql import functions as F
+import json
 
 try:
     solution_config = (dbutils.widgets.get("solution_config"))
-    solution_config = ast.literal_eval(solution_config)
+    solution_config = json.loads(solution_config)
+    print("Loaded config from dbutils")
+
 except Exception as e:
     print(e)
     with open('../data_config/SolutionConfig.yaml', 'r') as solution_config:
@@ -145,11 +146,6 @@ output_1_df = output_1_df.withColumn(
 output_1_df = output_1_df.withColumn("date", F.lit(date))
 output_1_df = output_1_df.withColumn("date", to_date_(F.col("date")))
 
-# ADD A MONOTONICALLY INREASING COLUMN
-if "id" not in output_1_df.columns : 
-  window = Window.orderBy(F.monotonically_increasing_id())
-  output_1_df = output_1_df.withColumn("id", F.row_number().over(window))
-
 # COMMAND ----------
 
 # DBTITLE 1,writing to output_1
@@ -167,9 +163,25 @@ if catalog_name and catalog_name.lower() != "none":
 spark.sql(f"CREATE DATABASE IF NOT EXISTS {db_name}")
 print(f"HIVE METASTORE DATABASE NAME : {db_name}")
 
-output_1_df.createOrReplaceTempView(table_name)
-
 feature_table_exist = [True for table_data in spark.catalog.listTables(db_name) if table_data.name.lower() == table_name.lower() and not table_data.isTemporary]
+
+# Fetch the max ID from the existing table if it exists
+if any(feature_table_exist):
+    max_id_query = f"SELECT MAX(id) as max_id FROM {output_path}"
+    max_id = spark.sql(max_id_query).collect()[0]["max_id"]
+    print("max_id: ",max_id)
+    if max_id is None:
+        max_id = 0
+else:
+    max_id = 0
+
+# Add a monotonically increasing column starting from the previous max ID
+if "id" not in output_1_df.columns:
+    window = Window.orderBy(F.monotonically_increasing_id())
+    output_1_df = output_1_df.withColumn("id", F.row_number().over(window) + max_id)
+
+# Register the DataFrame as a temporary view
+output_1_df.createOrReplaceTempView(table_name)
 
 if not any(feature_table_exist):
   print(f"CREATING SOURCE TABLE")
@@ -178,10 +190,7 @@ else :
   print(F"UPDATING SOURCE TABLE")
   spark.sql(f"INSERT INTO {output_path} SELECT * FROM {table_name}")
 
-if catalog_name:
-  output_1_table_path = output_path
-else:
-  output_1_table_path = spark.sql(f"desc formatted {output_path}").filter(F.col("col_name") == "Location").select("data_type").collect()[0][0]
+output_1_table_path = output_path
 
 print(f"Features Hive Path : {output_1_table_path}")
 
@@ -229,51 +238,3 @@ mlclient.log(operation_type = "register_table",
     stagemetrics=stagemetrics,
     # register_in_feature_store=True,
     verbose=True,)
-
-# COMMAND ----------
-
-storage_configs = solution_config["data_engineering_ft"]["storage_configs"]
-
-# COMMAND ----------
-
-import json
-
-# COMMAND ----------
-
-def get_job_id_run_id(dbutils):
-    try:
-        notebook_info = json.loads(
-            dbutils.notebook.entry_point.getDbutils().notebook().getContext().toJson()
-        )
-
-        multitaskParentRunId = notebook_info["tags"].get("multitaskParentRunId", None)
-        idInJob = notebook_info["tags"].get("idInJob", None)
-        print(f"multitaskParentRunId : {multitaskParentRunId}, idInJob: {idInJob}")
-        run_id = multitaskParentRunId if multitaskParentRunId else idInJob
-        job_id = notebook_info["tags"]["jobId"]
-    except:
-        job_id = None
-        run_id = None
-
-    return job_id, run_id
-
-
-# COMMAND ----------
-
-job_id, run_id = get_job_id_run_id(dbutils)
-
-# COMMAND ----------
-
-try:
-    dbutils.notebook.run(
-        "DataAnalysis", 
-        timeout_seconds=0,
-        arguments={
-            "table_path" : input_table_paths['source_1'],
-            "storage_configs" : json.dumps(storage_configs),
-            "env" : env,
-            "job_id": job_id,
-            "run_id" : run_id
-        })
-except:
-    pass

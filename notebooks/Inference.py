@@ -1,12 +1,5 @@
 # Databricks notebook source
-# MAGIC %md
-# MAGIC
-
-# COMMAND ----------
-
-# %pip install databricks-feature-store
-# %pip install /dbfs/FileStore/sdk/dev/MLCoreSDK-0.4.5-py3-none-any.whl --force-reinstall
-%pip install sparkmeasure
+# MAGIC %pip install sparkmeasure
 
 # COMMAND ----------
 
@@ -25,13 +18,17 @@ import yaml
 import ast
 import pickle
 from MLCORE_SDK import mlclient
+import json
 from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.types import StructType, StructField, IntegerType, StringType
 from pyspark.sql.window import Window
+from datetime import datetime
+
+
 
 try:
     solution_config = (dbutils.widgets.get("solution_config"))
-    solution_config = ast.literal_eval(solution_config)
+    solution_config = json.loads(solution_config)
 except Exception as e:
     print(e)
     with open('../data_config/SolutionConfig.yaml', 'r') as solution_config:
@@ -68,6 +65,7 @@ input_table_configs = solution_config["inference"]["datalake_configs"]["input_ta
 output_table_configs = solution_config["inference"]["datalake_configs"]['output_tables']
 model_configs = solution_config["train"]["model_configs"]
 feature_columns = solution_config['train']["feature_columns"]
+target_columns = solution_config['train']["target_columns"]
 is_scheduled = solution_config["inference"]["is_scheduled"]
 batch_size = int(solution_config["inference"].get("batch_size",500))
 cron_job_schedule = solution_config["inference"].get("cron_job_schedule","0 */10 * ? * *")
@@ -99,8 +97,7 @@ output_table_paths = get_name_space(output_table_configs)
 # COMMAND ----------
 
 def table_already_created(catalog_name, db_name, table_name):
-    if catalog_name:
-        db_name = f"{catalog_name}.{db_name}"
+    db_name = f"{catalog_name}.{db_name}" if catalog_name else db_name
     table_exists = [True for table_data in spark.catalog.listTables(db_name) if table_data.name.lower() == table_name.lower() and not table_data.isTemporary]
     return any(table_exists)
 
@@ -129,9 +126,7 @@ def generate_filter_condition(start_marker, end_marker):
     filter_column = 'id'  # Replace with the actual column name
     return f"{filter_column} > {end_marker}"
 
-def update_task_logger(catalog_name, db_name, task_logger_table_name, end_marker, batch_size):
-    start_marker = end_marker + 1
-    end_marker = end_marker + batch_size
+def update_task_logger(catalog_name, db_name, task_logger_table_name, start_marker, end_marker, batch_size):
     print(f"start_marker : {start_marker}")
     print(f"end_marker : {end_marker}")
 
@@ -150,7 +145,7 @@ def update_task_logger(catalog_name, db_name, task_logger_table_name, end_marker
     df_task = df_task.withColumn("timestamp", F.expr("reflect('java.lang.System', 'currentTimeMillis')").cast("long"))
     df_task = df_task.withColumn("date", F.lit(date))
     df_task = df_task.withColumn("date", F.to_date(F.col("date")))
-    
+
     if table_already_created(catalog_name, db_name, task_logger_table_name):
         if catalog_name and catalog_name.lower() != "none":
             spark.sql(f"USE CATALOG {catalog_name}")
@@ -186,48 +181,13 @@ features_df,start_marker,end_marker = get_the_batch_data(output_table_configs["o
 
 gt_df,start_marker,end_marker = get_the_batch_data(output_table_configs["output_1"]["catalog_name"], output_table_configs["output_1"]["schema"], input_table_paths['input_2'], task_logger_table_name, batch_size)
 
-print(start_marker)
-print(end_marker)
-
 # COMMAND ----------
 
 features_df = spark.sql(f"SELECT * FROM {input_table_paths['input_1']}")
 
 # COMMAND ----------
 
-pickle_file_path = f"/mnt/FileStore/{output_table_configs['output_1']['schema']}"
-dbutils.fs.mkdirs(pickle_file_path)
-print(f"Created directory : {pickle_file_path}")
-pickle_file_path = f"/dbfs/{pickle_file_path}/{output_table_configs['output_1']['table']}.pickle"
-
-# COMMAND ----------
-
-try : 
-  with open(pickle_file_path, "rb") as handle:
-      obj_properties = pickle.load(handle)
-      print(f"Instance loaded successfully")
-except Exception as e:
-  print(f"Exception while loading cache : {e}")
-  obj_properties = {}
-print(f"Existing Cache : {obj_properties}")
-
-if not obj_properties :
-  start_marker = 1
-elif obj_properties and obj_properties.get("end_marker",0) == 0:
-  start_marker = 1
-else :
-  start_marker = obj_properties["end_marker"] + 1
-end_marker = start_marker + batch_size - 1
-
-print(f"Start Marker : {start_marker}\nEnd Marker : {end_marker}")
-
-# COMMAND ----------
-
-FT_DF = features_df.filter((F.col("id") >= start_marker) & (F.col("id") <= end_marker))
-
-# COMMAND ----------
-
-if not FT_DF.first():
+if not features_df.first():
   dbutils.notebook.exit("No data is available for inference, hence exiting the notebook")
 
 # COMMAND ----------
@@ -264,6 +224,11 @@ def load_model(model_configs):
 
 # COMMAND ----------
 
+ground_truth = gt_df.select([input_table_configs["input_2"]["primary_keys"]] + target_columns)
+inference_df = features_df
+
+# COMMAND ----------
+
 # MAGIC %md 
 # MAGIC ### Load Model
 
@@ -294,24 +259,6 @@ mlclient.log(
     tracking_env = env,
     verbose = True,
 )
-
-# COMMAND ----------
-
-FT_DF = FT_DF.dropna()
-
-# COMMAND ----------
-
-# MAGIC %md 
-# MAGIC ###Load Inference Features Data
-
-# COMMAND ----------
-
-from pyspark.sql import functions as F
-from pyspark.ml.feature import VectorAssembler
-
-assembler = VectorAssembler(inputCols=feature_columns, outputCol="features")
-processed_df = assembler.transform(FT_DF)
-inference_df = processed_df.select("features", *feature_columns)
 
 # COMMAND ----------
 
@@ -346,6 +293,19 @@ output_table.display()
 
 # COMMAND ----------
 
+from MLCORE_SDK.helpers.mlc_helper import get_job_id_run_id
+job_id, run_id, task_id = get_job_id_run_id(dbutils)
+
+# COMMAND ----------
+
+output_table = output_table.withColumn("model_name",F.lit(model_configs["model_params"]["model_name"]).cast("string"))
+output_table = output_table.withColumn("model_version",F.lit(get_latest_model_version(model_configs)).cast("string"))
+output_table = output_table.withColumn("inference_job_id",F.lit(job_id).cast("string"))
+output_table = output_table.withColumn("inference_run_id",F.lit(run_id).cast("string"))
+output_table = output_table.withColumn("inference_task_id",F.lit(task_id).cast("string"))
+
+# COMMAND ----------
+
 def to_date_(col):
     """
     Checks col row-wise and returns first date format which returns non-null output for the respective column value
@@ -359,6 +319,23 @@ def to_date_(col):
              "yyyy-dd-MM"
             )
     return F.coalesce(*[F.to_date(col, f) for f in formats])
+
+# COMMAND ----------
+
+now = datetime.now()
+date = now.strftime("%m-%d-%Y")
+output_table = output_table.withColumn(
+    "timestamp",
+    F.expr("reflect('java.lang.System', 'currentTimeMillis')").cast("long"),
+)
+output_table = output_table.withColumn("date", F.lit(date))
+output_table = output_table.withColumn("date", to_date_(F.col("date")))
+
+# ADD A MONOTONICALLY INREASING COLUMN
+if "id" not in output_table.columns : 
+  window = Window.orderBy(F.monotonically_increasing_id())
+  output_table = output_table.withColumn("id", F.row_number().over(window))
+
 
 # COMMAND ----------
 
@@ -398,7 +375,8 @@ if catalog_name and catalog_name.lower() != "none":
 else:
   output_1_table_path = spark.sql(f"desc formatted {output_path}").filter(F.col("col_name") == "Location").select("data_type").collect()[0][0]
 
-print(f"Features Hive Path : {output_1_table_path}")
+# print(f"Features Hive Path : {output_1_table_path}")
+print(f"Inference Output Table Hive Path : {output_1_table_path}")
 
 # COMMAND ----------
 
@@ -431,7 +409,7 @@ compute_metrics['peakExecutionMemory'] = float(compute_metrics['peakExecutionMem
 import time
 from datetime import datetime  
 from pyspark.sql.types import StructType, StructField, IntegerType,StringType
-df_task = update_task_logger(output_table_configs["output_1"]["catalog_name"], output_table_configs["output_1"]["schema"],task_logger_table_name,end_marker, batch_size)
+df_task = update_task_logger(output_table_configs["output_1"]["catalog_name"], output_table_configs["output_1"]["schema"],task_logger_table_name, start_marker, end_marker, batch_size)
 if catalog_name:
     db_name=f"{catalog_name}.{db_name}"
     logger_table_path=f"{db_name}.{task_logger_table_name}"
@@ -476,7 +454,7 @@ mlclient.log(operation_type = "register_table",
 
 # COMMAND ----------
 
-mlclient.log(operation_type = "register_inference",
+deployment_master_id = mlclient.log(operation_type = "register_inference",
     sdk_session_id = sdk_session_id,
     dbutils = dbutils,
     spark = spark,
@@ -503,6 +481,72 @@ mlclient.log(operation_type = "register_inference",
 
 # COMMAND ----------
 
-with open(pickle_file_path, "wb") as handle:
-    pickle.dump(obj_properties, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    print(f"Instance successfully saved successfully")
+if not deployment_master_id :
+    dbutils.notebook.exit("Inference is not registered successfully hence skipping the saving of the data in the aggregate table.")
+
+# COMMAND ----------
+
+# DBTITLE 1,Write Aggregated Inference Output Table
+db_name = output_table_configs["output_1"]["schema"]
+aggregated_table_name = f"{sdk_session_id}_inference_output_aggregated_table"
+catalog_name = output_table_configs["output_1"]["catalog_name"]
+
+if catalog_name and catalog_name.lower() != "none":
+    output_path = f"{catalog_name}.{db_name}.{aggregated_table_name}"
+else :
+    output_path = f"{db_name}.{aggregated_table_name}"
+
+# Get the catalog name from the table name
+if catalog_name and catalog_name.lower() != "none":
+  spark.sql(f"USE CATALOG {catalog_name}")
+
+# Create the database if it does not exist
+spark.sql(f"CREATE DATABASE IF NOT EXISTS {db_name}")
+print(f"HIVE METASTORE DATABASE NAME : {db_name}")
+
+inference_table_exists = [True for table_data in spark.catalog.listTables(db_name) if table_data.name.lower() == aggregated_table_name.lower() and not table_data.isTemporary]
+
+# IF the table exists, reset the ID based on existing max marker
+if any(inference_table_exists):
+    max_id_value = spark.sql(f"SELECT max(id) FROM {output_path}").collect()[0][0]
+    window = Window.orderBy(F.monotonically_increasing_id())
+    output_table = output_table.withColumn("id", F.row_number().over(window) + max_id_value)
+
+output_table = output_table.withColumn("deployment_master_id", F.lit(deployment_master_id).cast("string"))
+
+# Create temporary View.
+output_table.createOrReplaceTempView(aggregated_table_name)
+
+if not any(inference_table_exists):
+  print(f"CREATING SOURCE TABLE")
+  spark.sql(f"CREATE TABLE IF NOT EXISTS {output_path} PARTITIONED BY (deployment_master_id) AS SELECT * FROM {aggregated_table_name}")
+else :
+  print(F"UPDATING SOURCE TABLE")
+  spark.sql(f"INSERT INTO {output_path} PARTITION (deployment_master_id) SELECT * FROM {aggregated_table_name}")
+
+if catalog_name and catalog_name.lower() != "none":
+  aggregated_table_path = output_path
+else:
+  aggregated_table_path = spark.sql(f"desc formatted {output_path}").filter(F.col("col_name") == "Location").select("data_type").collect()[0][0]
+
+print(f"Aggregated Inference Output Table Hive Path : {aggregated_table_path}")
+
+# COMMAND ----------
+
+# Register Aggregate Train Output in MLCore
+mlclient.log(operation_type = "register_table",
+    sdk_session_id = sdk_session_id,
+    dbutils = dbutils,
+    spark = spark,
+    table_name = aggregated_table_name,
+    num_rows = output_table.count(),
+    tracking_env = env,
+    cols = output_table.columns,
+    column_datatype = output_table.dtypes,
+    table_schema = output_table.schema,
+    primary_keys = ["id"],
+    table_path = aggregated_table_path,
+    table_type="unitycatalog" if output_table_configs["output_1"]["catalog_name"] else "internal",
+    table_sub_type="Inference_Output",
+    platform_table_type = "Aggregated_Model_Inference_Output",
+    verbose=True,)

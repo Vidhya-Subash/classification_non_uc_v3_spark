@@ -4,9 +4,7 @@
 
 # COMMAND ----------
 
-# %pip install numpy==1.19.1
-# %pip install pandas==1.0.5
-%pip install kaleido
+# MAGIC %pip install kaleido
 
 # COMMAND ----------
 
@@ -15,21 +13,12 @@
 
 # COMMAND ----------
 
-from sklearn.model_selection import train_test_split
 from hyperopt import tpe, fmin, STATUS_OK, Trials, SparkTrials, space_eval
-from sklearn.metrics import (
-    accuracy_score,
-    f1_score,
-    precision_score,
-    recall_score,
-)
 from pyspark.sql import functions as F
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.classification import LogisticRegression
 from pyspark.ml import Pipeline
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
-from sklearn.model_selection import cross_val_score
-from hyperopt.pyll import scope
 from hyperopt import fmin, tpe, hp, Trials
 from hyperopt.spark import SparkTrials
 import numpy as np
@@ -46,7 +35,7 @@ mlflow.autolog(disable=True)
 import yaml
 from utils import utils
 
-with open('../data_config/SolutionConfig.yaml', 'r') as solution_config:
+with open('../data_config/SolutionConfig_dev.yaml', 'r') as solution_config:
     solution_config = yaml.safe_load(solution_config)
 
 # COMMAND ----------
@@ -98,15 +87,25 @@ gt_data = spark.sql(f"SELECT * FROM {input_table_paths['input_2']}")
 
 # COMMAND ----------
 
+ft_data = ft_data.withColumnRenamed("id", "id_ft")
+ft_data = ft_data.withColumnRenamed("timestamp", "timestamp_ft")
+ft_data = ft_data.withColumnRenamed("date", "date_ft")
+
+gt_data = gt_data.withColumnRenamed("id", "id_gt")
+gt_data = gt_data.withColumnRenamed("timestamp", "timestamp_gt")
+gt_data = gt_data.withColumnRenamed("date", "date_gt")
+
+# COMMAND ----------
+
 final_df = ft_data.join(gt_data, on = input_table_configs["input_1"]["primary_keys"])
 
 # COMMAND ----------
 
-final_df.printSchema()
+final_df = final_df.dropna()
 
 # COMMAND ----------
 
-final_df.show()
+final_df = final_df.sample(fraction=0.3)
 
 # COMMAND ----------
 
@@ -264,7 +263,6 @@ best_hyperparameters , tuning_trails = hyperparameter_tuning_with_trials( search
 
 best_hyperparameters = space_eval(search_space, best_hyperparameters)
 tuning_trails_all = get_trial_data(tuning_trails, search_space)
-
 
 # COMMAND ----------
 
