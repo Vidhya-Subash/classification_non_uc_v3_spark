@@ -1,7 +1,7 @@
 resources:
   jobs:
-    diabetes_250702_v2_inference:
-      name: diabetes_250702_v2_inference
+    diabetes_270701_v2_inference:
+      name: diabetes_270701_v2_inference
       type: Inference
       #is_deterministic: False
 
